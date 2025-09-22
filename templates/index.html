@@ -67,6 +67,33 @@
         <!-- 영상 목록이 표시될 컨테이너 -->
         <div id="video-list-container" class="mt-6 w-full overflow-x-auto"></div>
 
+        <!-- 품질 옵션 선택 -->
+        <div id="model-options-container" class="mt-6 hidden">
+            <label for="model-select" class="block text-sm font-medium text-slate-700 mb-1">품질/속도 옵션 선택</label>
+            <select id="model-select" class="w-full px-3 py-2 border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                <option value="tiny">가장 빠름 (정확도 낮음)</option>
+                <option value="base" selected>빠름 (기본)</option>
+                <option value="small">중간 (정확도/속도 균형)</option>
+                <option value="medium">느림 (정확도 높음)</option>
+                <option value="large">가장 느림 (정확도 가장 높음)</option>
+            </select>
+        </div>
+
+        <!-- 처리 방식 선택 -->
+        <div id="mode-options-container" class="mt-4 hidden">
+             <label class="block text-sm font-medium text-slate-700 mb-2">처리 방식 선택</label>
+             <div class="flex items-center space-x-6">
+                <div class="flex items-center">
+                    <input id="mode-sequential" name="processing-mode" type="radio" value="sequential" checked class="h-4 w-4 text-indigo-600 border-slate-300 focus:ring-indigo-500">
+                    <label for="mode-sequential" class="ml-2 block text-sm text-slate-900">기본 모드 (1개씩 처리)</label>
+                </div>
+                <div class="flex items-center">
+                    <input id="mode-parallel" name="processing-mode" type="radio" value="parallel" class="h-4 w-4 text-indigo-600 border-slate-300 focus:ring-indigo-500">
+                    <label for="mode-parallel" class="ml-2 block text-sm text-slate-900">성능 모드 (동시 처리)</label>
+                </div>
+             </div>
+        </div>
+
         <!-- 텍스트 추출 버튼 -->
         <div class="mt-6">
             <button id="transcribe-btn" class="w-full flex items-center justify-center bg-emerald-600 text-white font-bold py-2.5 px-4 rounded-lg hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-500 transition-colors duration-200 hidden disabled:bg-emerald-400">
@@ -74,6 +101,12 @@
                  <div class="loader hidden ml-3"></div>
             </button>
         </div>
+
+        <!-- 진행률 표시 UI -->
+        <div id="progress-container" class="mt-4 hidden w-full bg-slate-200 rounded-full h-6">
+            <div id="progress-bar" class="bg-indigo-600 h-6 text-xs font-medium text-blue-100 text-center p-1 leading-none rounded-full" style="width: 0%">0%</div>
+        </div>
+        <div id="progress-text" class="text-center text-sm text-slate-600 mt-1"></div>
 
         <!-- 결과가 표시될 컨테이너 -->
         <div id="results-container" class="mt-6 space-y-3"></div>
@@ -87,9 +120,15 @@
         const transcribeBtn = document.getElementById('transcribe-btn');
         const statusContainer = document.getElementById('status-container');
         const resultsContainer = document.getElementById('results-container');
+        const modelOptionsContainer = document.getElementById('model-options-container');
+        const modelSelect = document.getElementById('model-select');
+        const progressContainer = document.getElementById('progress-container');
+        const progressBar = document.getElementById('progress-bar');
+        const progressText = document.getElementById('progress-text');
 
         let videoData = [];
         let allTranscribedData = [];
+        let progressInterval;
 
         const toggleLoading = (button, isLoading, text) => {
             const btnText = button.querySelector('.btn-text');
@@ -118,6 +157,7 @@
             videoListContainer.innerHTML = '';
             resultsContainer.innerHTML = '';
             transcribeBtn.classList.add('hidden');
+            modelOptionsContainer.classList.add('hidden');
 
             try {
                 const response = await fetch('/fetch-videos', {
@@ -152,16 +192,23 @@
                 return videoData.find(v => v.videoId === videoId);
             });
 
-            showStatus(`${videosToTranscribe.length}개 영상 처리 중... 잠시만 기다려주세요.`, 'loading');
+            const selectedMode = document.querySelector('input[name="processing-mode"]:checked').value;
+            const selectedModel = modelSelect.value;
+
+            showStatus(``, 'loading'); // 기존 상태 메시지 클리어
             toggleLoading(transcribeBtn, true, '처리 중...');
             resultsContainer.innerHTML = '';
+            progressContainer.classList.remove('hidden');
+            updateProgressUI(0, videosToTranscribe.length);
+
+            // 진행 상황 폴링 시작
+            progressInterval = setInterval(updateProgress, 1000);
 
             try {
-                const urlsToTranscribe = videosToTranscribe.map(v => v.url);
                 const response = await fetch('/transcribe_multiple', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ urls: urlsToTranscribe })
+                    body: JSON.stringify({ urls: videosToTranscribe.map(v => v.url), model: selectedModel, mode: selectedMode })
                 });
                 const results = await response.json();
                 if (!response.ok) throw new Error(results.error || '텍스트 추출 중 오류가 발생했습니다.');
@@ -179,8 +226,32 @@
                 showStatus(error.message, 'error');
             } finally {
                 toggleLoading(transcribeBtn, false, '선택한 영상 텍스트 추출');
+                clearInterval(progressInterval); // 폴링 중지
+                progressContainer.classList.add('hidden');
+                progressText.classList.add('hidden');
             }
         });
+
+        async function updateProgress() {
+            try {
+                const response = await fetch('/progress');
+                const data = await response.json();
+                if (data.total > 0) {
+                    updateProgressUI(data.current, data.total);
+                }
+            } catch (error) {
+                console.error('Progress update failed:', error);
+                clearInterval(progressInterval);
+            }
+        }
+
+        function updateProgressUI(current, total) {
+            const percentage = total > 0 ? Math.round((current / total) * 100) : 0;
+            progressBar.style.width = `${percentage}%`;
+            progressBar.textContent = `${percentage}%`;
+            progressText.textContent = `(${current} / ${total})`;
+            progressText.classList.remove('hidden');
+        }
 
         function displayVideoTable(videos) {
             if (videos.length === 0) {
@@ -253,6 +324,8 @@
             });
 
             transcribeBtn.classList.remove('hidden');
+            modelOptionsContainer.classList.remove('hidden');
+            document.getElementById('mode-options-container').classList.remove('hidden');
         }
 
         function displayTranscriptionResults(results) {

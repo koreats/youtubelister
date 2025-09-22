@@ -34,6 +34,7 @@ app = Flask(__name__)
 # --- GPU 확인 및 모델 캐시 준비 ---
 LOADED_MODELS = {}
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+TRANSCRIPTION_PROGRESS = {"current": 0, "total": 0, "status": "idle"}
 
 if DEVICE == "cuda":
     print("\n*** NVIDIA GPU(CUDA)가 감지되었습니다! GPU를 사용하여 텍스트 추출 속도를 높입니다. ***\n")
@@ -246,13 +247,22 @@ def fetch_videos():
     except Exception as e:
         return jsonify({"error": f"An unexpected error occurred: {str(e)}"}), 500
 
+@app.route("/progress")
+def progress():
+    global TRANSCRIPTION_PROGRESS
+    return jsonify(TRANSCRIPTION_PROGRESS)
+
 @app.route("/transcribe_multiple", methods=["POST"])
 def transcribe_multiple():
+    global TRANSCRIPTION_PROGRESS
     data = request.get_json()
     urls = data.get('urls', [])
     model_name = data.get('model', 'base')
     mode = data.get('mode', 'sequential') # 기본값은 순차 처리
     results = []
+
+    # 진행 상황 초기화
+    TRANSCRIPTION_PROGRESS = {"current": 0, "total": len(urls), "status": "processing"}
     
     print(f"\n--- Received {len(urls)} URLs for transcription with model '{model_name}' in '{mode}' mode ---")
 
@@ -260,12 +270,17 @@ def transcribe_multiple():
         # 성능 모드: 병렬 처리
         tasks = [(i, url, model_name) for i, url in enumerate(urls)]
         with concurrent.futures.ProcessPoolExecutor() as executor:
-            results = list(executor.map(process_video_task, tasks))
+            # 각 작업이 완료될 때마다 진행 상황을 업데이트하기 위해 as_completed 사용
+            future_to_url = {executor.submit(process_video_task, task): task for task in tasks}
+            for future in concurrent.futures.as_completed(future_to_url):
+                results.append(future.result())
+                TRANSCRIPTION_PROGRESS["current"] += 1
     else:
         # 기본 모드: 순차 처리
         try:
             whisper_model = get_model(model_name)
         except Exception as e:
+            TRANSCRIPTION_PROGRESS["status"] = "error"
             return jsonify({"error": f"모델 로딩 중 오류 발생: {e}"}), 500
 
         for i, url in enumerate(urls):
@@ -299,8 +314,10 @@ def transcribe_multiple():
             except Exception as e:
                 print(f" !!! ERROR processing {url}: {e}")
                 results.append({"title": f"오류 발생 (URL: {url})", "transcript": str(e)})
-                continue
+            
+            TRANSCRIPTION_PROGRESS["current"] = i + 1
 
+    TRANSCRIPTION_PROGRESS["status"] = "complete"
     print(f"--- Transcription finished. Returning {len(results)} results. ---")
     return jsonify({"results": results})
 
