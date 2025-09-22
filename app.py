@@ -1,42 +1,92 @@
+
 import os
 from flask import Flask, request, jsonify, render_template
+import re
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-import re
-from datetime import datetime
-
-# --- NEW IMPORTS for Transcription ---
 import yt_dlp
 import whisper
-import time # To simulate long tasks if needed
+import concurrent.futures
 
-# --- Suppress OAuth 2.0 warnings ---
+# --- Helper function to parse ISO 8601 duration ---
+def parse_iso8601_duration(duration_str):
+    # PnYnMnDTnHnMnS
+    match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration_str).groups()
+    hours = int(match[0]) if match[0] else 0
+    minutes = int(match[1]) if match[1] else 0
+    seconds = int(match[2]) if match[2] else 0
+    
+    if hours > 0:
+        return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
+    else:
+        return f'{minutes:02d}:{seconds:02d}'
+
+# --- 기본 설정 ---
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
-
 app = Flask(__name__)
 
-# --- NEW: Load Whisper Model ---
-# This loads the model into memory once when the application starts.
-# This avoids reloading the model on every request, which is very slow.
-# "base" is fast. For higher accuracy, you can use "small" or "medium",
-# but they are slower and require more memory.
+# --- Whisper 모델 로딩 (앱 시작 시 한 번만) ---
 print("Loading Whisper model...")
 whisper_model = whisper.load_model("base")
 print("Whisper model loaded.")
 
 
-# --- EXISTING CODE (No changes needed below) ---
+# --- 병렬 처리를 위한 단일 작업 함수 ---
+def process_video_task(args):
+    index, url = args
+    print(f"[Task {index+1}] Starting for URL: {url}")
+    try:
+        # 1. Download Audio using yt-dlp
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'outtmpl': f'temp_audio_{index}.%(ext)s',
+            'quiet': True,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            video_info = ydl.extract_info(url, download=True)
+            audio_filename = f"temp_audio_{index}.mp3"
+            video_title = video_info.get('title', '제목 없음')
+
+        print(f"[Task {index+1}] Audio downloaded: {audio_filename}")
+
+        # 2. Transcribe with Whisper
+        print(f"[Task {index+1}] Transcribing with Whisper...")
+        transcription_result = whisper_model.transcribe(audio_filename)
+        transcript_text = transcription_result.get('text', '')
+        print(f"[Task {index+1}] Transcription complete.")
+        
+        # 3. Clean up the downloaded file
+        os.remove(audio_filename)
+        print(f"[Task {index+1}] Cleanup complete.")
+
+        return {"title": video_title, "transcript": transcript_text}
+
+    except Exception as e:
+        print(f"[Task {index+1}] !!! ERROR processing {url}: {e}")
+        return {"title": f"오류 발생 (URL: {url})", "transcript": str(e)}
 
 def get_channel_id_from_url(url):
     """Extracts a tuple of (identifier, type) from various YouTube URL formats."""
+    # type can be 'id', 'handle', 'search_term'
+    
+    # Handle: @ (e.g., /@productibe)
     match = re.search(r'youtube\.com/(@[a-zA-Z0-9_.-]+)', url)
     if match:
+        # forHandle API parameter does not take the '@', so we strip it.
         return (match.group(1).lstrip('@'), 'handle')
 
+    # Channel ID: /channel/UC...
     match = re.search(r'youtube\.com/channel/(UC[a-zA-Z0-9_-]{22}[a-zA-Z0-9_-])', url)
     if match:
         return (match.group(1), 'id')
 
+    # Legacy custom URL: /c/ or /user/
     match = re.search(r'youtube\.com/(?:c|user)/([a-zA-Z0-9_.-]+)', url)
     if match:
         return (match.group(1), 'search_term')
@@ -62,10 +112,12 @@ def fetch_videos():
         identifier = None
         id_type = None
 
+        # 1. Check if the input string itself is a raw Channel ID
         if re.fullmatch(r'UC[a-zA-Z0-9_-]{22}[a-zA-Z0-9_-]', channel_url):
             identifier = channel_url
             id_type = 'id'
         else:
+            # 2. If not a raw ID, parse it as a URL
             identifier, id_type = get_channel_id_from_url(channel_url)
 
         if not identifier:
@@ -73,18 +125,22 @@ def fetch_videos():
 
         channel_id = None
 
+        # 3. Find the actual channel_id using the identifier and its type
         if id_type == 'id':
             channel_id = identifier
         
         if id_type == 'handle':
             try:
+                # Use the modern `forHandle` parameter for precise matching.
                 channel_request = youtube.channels().list(part="id", forHandle=identifier)
                 response = channel_request.execute()
                 if response.get("items"):
                     channel_id = response["items"][0]["id"]
             except HttpError:
+                # Fallback to search if forHandle fails (e.g., old API key)
                 pass
         
+        # 4. Fallback to a general search for legacy URLs or if other methods fail
         if not channel_id:
             try:
                 search_request = youtube.search().list(part="id", q=identifier, type="channel", maxResults=1)
@@ -97,6 +153,7 @@ def fetch_videos():
         if not channel_id:
             return jsonify({"error": "오류: 유튜브 채널을 찾을 수 없습니다. URL을 확인하거나 공개된 채널인지 확인하세요."}), 404
 
+        # 5. With a definitive channel_id, get the uploads playlist.
         channel_details_response = youtube.channels().list(
             part="contentDetails",
             id=channel_id
@@ -118,18 +175,33 @@ def fetch_videos():
             )
             playlist_response = playlist_request.execute()
 
+            video_ids = [item['snippet']['resourceId']['videoId'] for item in playlist_response.get("items", [])]
+            
+            if not video_ids:
+                break
+
+            video_details_request = youtube.videos().list(
+                part="contentDetails",
+                id=",".join(video_ids)
+            )
+            video_details_response = video_details_request.execute()
+            durations = {item['id']: parse_iso8601_duration(item['contentDetails']['duration']) for item in video_details_response.get("items", [])}
+
             for item in playlist_response.get("items", []):
                 snippet = item.get("snippet")
-                if not snippet: continue
-                resource_id = snippet.get("resourceId")
-                if not resource_id: continue
-                video_id = resource_id.get("videoId")
-                if not video_id: continue
+                if not snippet:
+                    continue
+
+                video_id = snippet.get("resourceId", {}).get("videoId")
+                if not video_id:
+                    continue
+
                 if "title" in snippet and "publishedAt" in snippet:
                     videos.append({
                         "videoId": video_id,
                         "title": snippet["title"],
                         "publishedAt": snippet["publishedAt"],
+                        "duration": durations.get(video_id, "00:00"),
                         "url": f"https://www.youtube.com/watch?v={video_id}"
                     })
 
@@ -148,9 +220,6 @@ def fetch_videos():
     except Exception as e:
         return jsonify({"error": f"An unexpected error occurred: {str(e)}"}), 500
 
-
-# --- NEW: API Endpoint for Transcription ---
-
 @app.route("/transcribe_multiple", methods=["POST"])
 def transcribe_multiple():
     data = request.get_json()
@@ -158,61 +227,15 @@ def transcribe_multiple():
     results = []
     print(f"\n--- Received {len(urls)} URLs for transcription ---")
 
-    for i, url in enumerate(urls):
-        print(f"\n[Video {i+1}/{len(urls)}] Processing URL: {url}")
-        try:
-            # 1. Download Audio using yt-dlp
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
-                'outtmpl': f'temp_audio_{i}.%(ext)s',
-                'quiet': False, # Show yt-dlp logs
-            }
-            
-            audio_filename = f"temp_audio_{i}.mp3"
-            video_title = "제목 없음"
-
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                video_info = ydl.extract_info(url, download=True)
-                video_title = video_info.get('title', '제목 없음')
-            
-            print(f" -> Audio downloaded: {audio_filename}")
-
-            # 2. Transcribe with Whisper
-            print(f" -> Transcribing with Whisper...")
-            transcription_result = whisper_model.transcribe(audio_filename, verbose=True)
-            transcript_text = transcription_result['text']
-            print(f" -> Transcription complete. Text length: {len(transcript_text)}")
-            
-            results.append({
-                "title": video_title,
-                "transcript": transcript_text
-            })
-
-            # 3. Clean up the downloaded file
-            print(f" -> Removing temporary file: {audio_filename}")
-            os.remove(audio_filename)
-
-        except Exception as e:
-            print(f" !!! ERROR processing {url}: {e}")
-            # If one video fails, add an error message for it and continue
-            results.append({
-                "title": f"오류 발생 (URL: {url})",
-                "transcript": str(e)
-            })
-            # Clean up if file exists even after error
-            if 'audio_filename' in locals() and os.path.exists(audio_filename):
-                os.remove(audio_filename)
-            continue
+    # 병렬 처리를 위해 ProcessPoolExecutor 사용
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        # enumerate를 사용하여 각 URL에 인덱스를 부여하고, 이를 map에 전달
+        # executor.map은 작업을 제출한 순서대로 결과를 반환합니다.
+        results = list(executor.map(process_video_task, enumerate(urls)))
 
     print(f"--- Transcription finished. Returning {len(results)} results. ---")
     return jsonify({"results": results})
 
 
-# --- EXISTING CODE ---
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=True, port=8080)

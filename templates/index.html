@@ -57,12 +57,12 @@
         const statusContainer = document.getElementById('status-container');
         const resultsContainer = document.getElementById('results-container');
 
-        let videoData = [];
+        let allTranscribedData = []; // Store full transcription data
 
         // 1. 영상 목록 조회 기능
         fetchBtn.addEventListener('click', async () => {
             const channelUrl = channelInput.value.trim();
-            const apiKey = "AIzaSyDnKP4KUcareg3DCHMu5T07FsG3KOf-5Dw";
+            // API 키는 코드에 하드코딩되어 있음
 
             if (!channelUrl) {
                 showStatus('채널 URL을 입력해주세요.', 'error');
@@ -80,7 +80,7 @@
                 const response = await fetch('/fetch-videos', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ channel_url: channelUrl, api_key: apiKey })
+                    body: JSON.stringify({ channel_url: channelUrl, api_key: "AIzaSyDnKP4KUcareg3DCHMu5T07FsG3KOf-5Dw" })
                 });
 
                 const data = await response.json();
@@ -110,17 +110,20 @@
                 return;
             }
 
-            const urlsToTranscribe = Array.from(checkedCheckboxes).map(checkbox => {
+            // URL뿐만 아니라 필요한 메타데이터를 함께 전송
+            const videosToTranscribe = Array.from(checkedCheckboxes).map(checkbox => {
                 const videoId = checkbox.value;
-                return `https://www.youtube.com/watch?v=${videoId}`;
+                return videoData.find(v => v.videoId === videoId);
             });
 
-            showStatus(`${urlsToTranscribe.length}개 영상 처리 중... 잠시만 기다려주세요.`, 'loading');
+            showStatus(`${videosToTranscribe.length}개 영상 처리 중... 잠시만 기다려주세요.`, 'loading');
             resultsContainer.innerHTML = '<p>로딩 중...</p>';
             transcribeBtn.disabled = true;
             transcribeBtn.textContent = '처리 중...';
 
             try {
+                // 서버에는 URL만 전송
+                const urlsToTranscribe = videosToTranscribe.map(v => v.url);
                 const response = await fetch('/transcribe_multiple', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -133,7 +136,16 @@
                     throw new Error(results.error || '텍스트 추출 중 오류가 발생했습니다.');
                 }
 
-                displayTranscriptionResults(results.results);
+                // 서버에서 받은 결과와 프론트에서 보낸 메타데이터를 합침
+                allTranscribedData = results.results.map((result, index) => {
+                    return {
+                        ...result,
+                        number: videosToTranscribe[index].number, // 넘버링 추가
+                        publishedAt: videosToTranscribe[index].publishedAt // 업로드일 추가
+                    };
+                });
+
+                displayTranscriptionResults(allTranscribedData);
                 showStatus('텍스트 추출이 완료되었습니다.', 'success');
 
             } catch (error) {
@@ -156,11 +168,14 @@
             table.innerHTML = `
                 <thead class="bg-gray-50">
                     <tr>
-                        <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        <th scope="col" class="px-2 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">No.</th>
+                        <th scope="col" class="px-2 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                             <input type="checkbox" id="select-all-checkbox" class="rounded border-gray-300">
                         </th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">제목</th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">업로드일</th>
+                        <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">제목</th>
+                        <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">영상 길이</th>
+                        <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">업로드일</th>
+                        <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">동작</th>
                     </tr>
                 </thead>
             `;
@@ -168,15 +183,21 @@
             const tbody = document.createElement('tbody');
             tbody.className = 'bg-white divide-y divide-gray-200';
 
-            videos.forEach(video => {
+            videos.forEach((video, index) => {
+                video.number = index + 1; // 데이터에 넘버링 추가
                 const tr = document.createElement('tr');
                 const publishedDate = new Date(video.publishedAt).toISOString().split('T')[0];
                 tr.innerHTML = `
-                    <td class="px-4 py-4 whitespace-nowrap">
+                    <td class="px-2 py-4 whitespace-nowrap text-sm text-gray-500">${video.number}</td>
+                    <td class="px-2 py-4 whitespace-nowrap">
                         <input type="checkbox" class="video-checkbox rounded border-gray-300" value="${video.videoId}">
                     </td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${video.title}</td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${publishedDate}</td>
+                    <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-900">${video.title}</td>
+                    <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-500">${video.duration}</td>
+                    <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-500">${publishedDate}</td>
+                    <td class="px-4 py-4 whitespace-nowrap text-sm font-medium">
+                        <button class="copy-url-btn text-indigo-600 hover:text-indigo-900" data-url="${video.url}">URL 복사</button>
+                    </td>
                 `;
                 tbody.appendChild(tr);
             });
@@ -188,6 +209,18 @@
             document.getElementById('select-all-checkbox').addEventListener('change', (e) => {
                 document.querySelectorAll('.video-checkbox').forEach(checkbox => {
                     checkbox.checked = e.target.checked;
+                });
+            });
+
+            // URL 복사 버튼에 이벤트 리스너 추가
+            document.querySelectorAll('.copy-url-btn').forEach(button => {
+                button.addEventListener('click', (e) => {
+                    const url = e.target.getAttribute('data-url');
+                    navigator.clipboard.writeText(url).then(() => {
+                        const originalText = e.target.textContent;
+                        e.target.textContent = '복사됨!';
+                        setTimeout(() => { e.target.textContent = originalText; }, 2000);
+                    });
                 });
             });
 
@@ -204,13 +237,15 @@
             results.forEach(result => {
                 const details = document.createElement('details');
                 details.className = 'bg-white shadow rounded-md mb-2';
+                details.setAttribute('data-number', result.number);
+                details.setAttribute('data-published', new Date(result.publishedAt).toISOString().split('T')[0]);
 
                 const summary = document.createElement('summary');
                 summary.className = 'font-semibold p-4 cursor-pointer';
-                summary.textContent = result.title || '제목 없음';
+                summary.textContent = `${result.number}. ${result.title}`;
 
                 const content = document.createElement('div');
-                content.className = 'p-4 border-t border-gray-200';
+                content.className = 'p-4 border-t border-gray-200 whitespace-pre-wrap';
                 content.textContent = result.transcript || '추출된 텍스트가 없습니다.';
 
                 details.appendChild(summary);
@@ -218,7 +253,6 @@
                 resultsContainer.appendChild(details);
             });
             
-            // 결과 아래에 버튼 추가
             addResultActionButtons();
         }
         
@@ -240,18 +274,15 @@
             buttonContainer.appendChild(downloadBtn);
             resultsContainer.appendChild(buttonContainer);
 
-            // 이벤트 리스너 추가
             copyBtn.addEventListener('click', copyAllAsMarkdown);
             downloadBtn.addEventListener('click', downloadAllAsMarkdown);
         }
 
         function generateResultsMarkdown() {
-            const results = Array.from(resultsContainer.querySelectorAll('details')).map(detail => {
-                const title = detail.querySelector('summary').textContent;
-                const transcript = detail.querySelector('div').textContent;
-                return `## ${title}\n\n${transcript}`;
-            });
-            return results.join('\n\n---\n\n');
+            return allTranscribedData.map(result => {
+                const publishedDate = new Date(result.publishedAt).toISOString().split('T')[0];
+                return `## ${result.number}. ${result.title}\n**업로드일:** ${publishedDate}\n\n${result.transcript}`;
+            }).join('\n\n---\n\n');
         }
 
         function copyAllAsMarkdown() {
