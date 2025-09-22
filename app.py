@@ -24,12 +24,18 @@ def parse_iso8601_duration(duration_str):
         
     return total_seconds, formatted_duration
 
+import torch
+
 # --- 기본 설정 ---
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 app = Flask(__name__)
 
-# --- Whisper 모델 로딩 (앱 시작 시 한 번만) ---
+# --- GPU 확인 및 Whisper 모델 로딩 ---
 print("Loading Whisper model...")
+if torch.cuda.is_available():
+    print("\n*** NVIDIA GPU(CUDA)가 감지되었습니다! GPU를 사용하여 텍스트 추출 속도를 높입니다. ***\n")
+else:
+    print("\n--- NVIDIA GPU가 감지되지 않았습니다. CPU를 사용하여 텍스트를 추출합니다. ---\n")
 whisper_model = whisper.load_model("base")
 print("Whisper model loaded.")
 
