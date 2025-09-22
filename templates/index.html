@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube 동영상 목록 생성기</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 2rem;
+            background-color: #f4f4f9;
+            color: #333;
+            display: flex;
+            justify-content: center;
+        }
+        .container {
+            width: 100%;
+            max-width: 800px;
+            background: #fff;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        h1 {
+            text-align: center;
+            color: #c0392b;
+            margin-bottom: 1.5rem;
+        }
+        .form-group {
+            margin-bottom: 1rem;
+        }
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+        }
+        input[type="text"], input[type="password"] {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        .button-group {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 1rem;
+        }
+        button {
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+            transition: background-color 0.2s;
+        }
+        #fetch-btn {
+            background-color: #c0392b;
+            color: white;
+            flex-grow: 1;
+        }
+        #fetch-btn:hover {
+            background-color: #a93226;
+        }
+        #copy-all-btn, #download-btn {
+            background-color: #3498db;
+            color: white;
+            display: none; /* Initially hidden */
+        }
+        #copy-all-btn:hover, #download-btn:hover {
+            background-color: #2980b9;
+        }
+        .copy-url-btn {
+            background-color: #27ae60;
+            color: white;
+            padding: 0.25rem 0.5rem;
+            font-size: 0.8rem;
+            margin-left: 0.5rem;
+        }
+        .copy-url-btn:hover {
+            background-color: #229954;
+        }
+        #results {
+            margin-top: 2rem;
+        }
+        .video-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem 0;
+            border-bottom: 1px solid #eee;
+        }
+        .video-item:last-child {
+            border-bottom: none;
+        }
+        .video-details {
+            flex-grow: 1;
+        }
+        .status {
+            text-align: center;
+            margin-top: 1rem;
+            font-weight: 500;
+        }
+        .error { color: #c0392b; }
+        .success { color: #27ae60; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>YouTube 채널 동영상 목록 생성기</h1>
+        <div class="form-group">
+            <label for="channel-url">YouTube 채널 URL</label>
+            <input type="text" id="channel-url" placeholder="예: https://www.youtube.com/@productibe">
+        </div>
+
+        <div class="button-group">
+            <button id="fetch-btn">동영상 가져오기</button>
+        </div>
+        <div class="button-group" style="margin-top: 1rem;">
+             <button id="copy-all-btn">전체 마크다운으로 복사</button>
+             <button id="download-btn">마크다운(.md)으로 다운로드</button>
+        </div>
+        <div id="status" class="status"></div>
+        <div id="results"></div>
+    </div>
+
+    <script>
+        const channelUrlInput = document.getElementById('channel-url');
+        const fetchBtn = document.getElementById('fetch-btn');
+        const copyAllBtn = document.getElementById('copy-all-btn');
+        const downloadBtn = document.getElementById('download-btn');
+        const resultsDiv = document.getElementById('results');
+        const statusDiv = document.getElementById('status');
+
+        let videoData = [];
+
+        fetchBtn.addEventListener('click', async () => {
+            const channelUrl = channelUrlInput.value.trim();
+            const apiKey = "AIzaSyDnKP4KUcareg3DCHMu5T07FsG3KOf-5Dw";
+
+            if (!channelUrl) {
+                showStatus('채널 URL을 입력해주세요.', 'error');
+                return;
+            }
+
+            showStatus('동영상을 가져오는 중...', 'info');
+            resultsDiv.innerHTML = '';
+            copyAllBtn.style.display = 'none';
+            downloadBtn.style.display = 'none';
+            fetchBtn.disabled = true;
+            fetchBtn.textContent = '가져오는 중...';
+
+            try {
+                const response = await fetch('/fetch-videos', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ channel_url: channelUrl, api_key: apiKey }),
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    videoData = data.videos;
+                    displayVideos(videoData);
+                    showStatus(`총 ${videoData.length}개의 동영상을 가져왔습니다.`, 'success');
+                    if (videoData.length > 0) {
+                        copyAllBtn.style.display = 'block';
+                        downloadBtn.style.display = 'block';
+                    }
+                } else {
+                    throw new Error(data.error || '알 수 없는 오류가 발생했습니다.');
+                }
+            } catch (error) {
+                showStatus(`오류: ${error.message}`, 'error');
+                videoData = [];
+            } finally {
+                fetchBtn.disabled = false;
+                fetchBtn.textContent = '동영상 가져오기';
+            }
+        });
+
+        function displayVideos(videos) {
+            resultsDiv.innerHTML = '';
+            if (videos.length === 0) {
+                resultsDiv.innerHTML = '<p>동영상을 찾을 수 없습니다.</p>';
+                return;
+            }
+            videos.forEach(video => {
+                const item = document.createElement('div');
+                item.className = 'video-item';
+
+                const details = document.createElement('div');
+                details.className = 'video-details';
+                const publishedDate = new Date(video.publishedAt).toISOString().split('T')[0];
+                details.textContent = `${video.title} - ${publishedDate}`;
+
+                const copyBtn = document.createElement('button');
+                copyBtn.textContent = 'URL 복사';
+                copyBtn.className = 'copy-url-btn';
+                copyBtn.onclick = () => copyToClipboard(video.url, copyBtn);
+
+                item.appendChild(details);
+                item.appendChild(copyBtn);
+                resultsDiv.appendChild(item);
+            });
+        }
+
+        function copyToClipboard(text, button) {
+            navigator.clipboard.writeText(text).then(() => {
+                const originalText = button.textContent;
+                button.textContent = '복사됨!';
+                setTimeout(() => { button.textContent = originalText; }, 2000);
+            }).catch(err => {
+                showStatus('URL 복사에 실패했습니다.', 'error');
+                console.error('Clipboard error:', err);
+            });
+        }
+
+        copyAllBtn.addEventListener('click', () => {
+            const markdown = generateMarkdown(videoData);
+            navigator.clipboard.writeText(markdown).then(() => {
+                showStatus('마크다운이 클립보드에 복사되었습니다!', 'success');
+            }).catch(err => {
+                showStatus('마크다운 복사에 실패했습니다.', 'error');
+            });
+        });
+
+        downloadBtn.addEventListener('click', () => {
+            const markdown = generateMarkdown(videoData);
+            const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            const channelName = channelUrlInput.value.split('/').filter(Boolean).pop() || 'youtube-channel';
+            a.href = url;
+            a.download = `${channelName}-videos.md`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            showStatus('마크다운 다운로드를 시작합니다.', 'success');
+        });
+
+        function generateMarkdown(videos) {
+            return videos.map(video => {
+                const publishedDate = new Date(video.publishedAt).toISOString().split('T')[0];
+                return `- [${video.title}](${video.url}) - 게시일: ${publishedDate}`;
+            }).join('\n');
+        }
+
+        function showStatus(message, type) {
+            statusDiv.textContent = message;
+            statusDiv.className = `status ${type}`;
+        }
+
+    </script>
+</body>
+</html>
