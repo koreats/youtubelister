@@ -7,6 +7,7 @@ from googleapiclient.errors import HttpError
 import yt_dlp
 import whisper
 import concurrent.futures
+import torch
 
 # --- Helper function to parse ISO 8601 duration ---
 def parse_iso8601_duration(duration_str):
@@ -24,27 +25,37 @@ def parse_iso8601_duration(duration_str):
         
     return total_seconds, formatted_duration
 
-import torch
+import concurrent.futures
 
 # --- 기본 설정 ---
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 app = Flask(__name__)
 
-# --- GPU 확인 및 Whisper 모델 로딩 ---
-print("Loading Whisper model...")
-if torch.cuda.is_available():
+# --- GPU 확인 및 모델 캐시 준비 ---
+LOADED_MODELS = {}
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+if DEVICE == "cuda":
     print("\n*** NVIDIA GPU(CUDA)가 감지되었습니다! GPU를 사용하여 텍스트 추출 속도를 높입니다. ***\n")
 else:
     print("\n--- NVIDIA GPU가 감지되지 않았습니다. CPU를 사용하여 텍스트를 추출합니다. ---\n")
-whisper_model = whisper.load_model("base")
-print("Whisper model loaded.")
 
+def get_model(model_name="base"):
+    # 이 함수는 메인 프로세스에서만 모델을 캐시합니다.
+    if model_name not in LOADED_MODELS:
+        print(f"Loading Whisper model '{model_name}' for the first time...")
+        LOADED_MODELS[model_name] = whisper.load_model(model_name, device=DEVICE)
+        print(f"Model '{model_name}' loaded.")
+    return LOADED_MODELS[model_name]
 
 # --- 병렬 처리를 위한 단일 작업 함수 ---
 def process_video_task(args):
-    index, url = args
-    print(f"[Task {index+1}] Starting for URL: {url}")
+    index, url, model_name = args
+    print(f"[Task {index+1}] Starting for URL: {url} with model '{model_name}'")
     try:
+        # 각 병렬 프로세스는 모델을 자체적으로 로드해야 합니다.
+        whisper_model = whisper.load_model(model_name, device=DEVICE)
+
         # 1. Download Audio using yt-dlp
         ydl_opts = {
             'format': 'bestaudio/best',
@@ -66,7 +77,7 @@ def process_video_task(args):
 
         # 2. Transcribe with Whisper
         print(f"[Task {index+1}] Transcribing with Whisper...")
-        transcription_result = whisper_model.transcribe(audio_filename)
+        transcription_result = whisper_model.transcribe(audio_filename, verbose=False) # 병렬 처리 시에는 상세 로그 끄기
         transcript_text = transcription_result.get('text', '')
         print(f"[Task {index+1}] Transcription complete.")
         
@@ -239,14 +250,56 @@ def fetch_videos():
 def transcribe_multiple():
     data = request.get_json()
     urls = data.get('urls', [])
+    model_name = data.get('model', 'base')
+    mode = data.get('mode', 'sequential') # 기본값은 순차 처리
     results = []
-    print(f"\n--- Received {len(urls)} URLs for transcription ---")
+    
+    print(f"\n--- Received {len(urls)} URLs for transcription with model '{model_name}' in '{mode}' mode ---")
 
-    # 병렬 처리를 위해 ProcessPoolExecutor 사용
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        # enumerate를 사용하여 각 URL에 인덱스를 부여하고, 이를 map에 전달
-        # executor.map은 작업을 제출한 순서대로 결과를 반환합니다.
-        results = list(executor.map(process_video_task, enumerate(urls)))
+    if mode == 'parallel':
+        # 성능 모드: 병렬 처리
+        tasks = [(i, url, model_name) for i, url in enumerate(urls)]
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            results = list(executor.map(process_video_task, tasks))
+    else:
+        # 기본 모드: 순차 처리
+        try:
+            whisper_model = get_model(model_name)
+        except Exception as e:
+            return jsonify({"error": f"모델 로딩 중 오류 발생: {e}"}), 500
+
+        for i, url in enumerate(urls):
+            print(f"\n[Video {i+1}/{len(urls)}] Processing URL: {url}")
+            try:
+                ydl_opts = {
+                    'format': 'bestaudio/best',
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }],
+                    'outtmpl': f'temp_audio_{i}.%(ext)s',
+                    'quiet': True,
+                }
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    video_info = ydl.extract_info(url, download=True)
+                    audio_filename = f"temp_audio_{i}.mp3"
+                    video_title = video_info.get('title', '제목 없음')
+
+                print(f" -> Audio downloaded: {audio_filename}")
+                print(f" -> Transcribing with Whisper '{model_name}' model...")
+                transcription_result = whisper_model.transcribe(audio_filename, verbose=True)
+                transcript_text = transcription_result.get('text', '')
+                print(f" -> Transcription complete.")
+                
+                results.append({"title": video_title, "transcript": transcript_text})
+                os.remove(audio_filename)
+
+            except Exception as e:
+                print(f" !!! ERROR processing {url}: {e}")
+                results.append({"title": f"오류 발생 (URL: {url})", "transcript": str(e)})
+                continue
 
     print(f"--- Transcription finished. Returning {len(results)} results. ---")
     return jsonify({"results": results})
