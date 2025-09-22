@@ -10,16 +10,19 @@ import concurrent.futures
 
 # --- Helper function to parse ISO 8601 duration ---
 def parse_iso8601_duration(duration_str):
-    # PnYnMnDTnHnMnS
+    # PnYnMnDTnHnMnS 형식의 문자열을 파싱하여 총 초와 포맷팅된 문자열을 반환
     match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration_str).groups()
     hours = int(match[0]) if match[0] else 0
     minutes = int(match[1]) if match[1] else 0
     seconds = int(match[2]) if match[2] else 0
+    total_seconds = hours * 3600 + minutes * 60 + seconds
     
     if hours > 0:
-        return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
+        formatted_duration = f'{hours:02d}:{minutes:02d}:{seconds:02d}'
     else:
-        return f'{minutes:02d}:{seconds:02d}'
+        formatted_duration = f'{minutes:02d}:{seconds:02d}'
+        
+    return total_seconds, formatted_duration
 
 # --- 기본 설정 ---
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
@@ -196,12 +199,18 @@ def fetch_videos():
                 if not video_id:
                     continue
 
+                duration_in_seconds, formatted_duration = durations.get(video_id, (0, "00:00"))
+
+                # 영상 길이가 2분(120초) 이하인 경우 목록에 추가하지 않음
+                if duration_in_seconds <= 120:
+                    continue
+
                 if "title" in snippet and "publishedAt" in snippet:
                     videos.append({
                         "videoId": video_id,
                         "title": snippet["title"],
                         "publishedAt": snippet["publishedAt"],
-                        "duration": durations.get(video_id, "00:00"),
+                        "duration": formatted_duration,
                         "url": f"https://www.youtube.com/watch?v={video_id}"
                     })
 
