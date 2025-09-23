@@ -279,27 +279,36 @@ def transcribe_multiple():
 
     if mode == 'parallel':
         # --- 최적의 작업자(worker) 수 계산 ---
-        # CPU 코어 수
         total_cores = os.cpu_count()
-        # 사용 가능한 메모리 (GB)
         available_memory_gb = psutil.virtual_memory().available / (1024 ** 3)
-        # 선택된 모델이 작업당 필요로 하는 메모리
-        required_memory_per_task = MODEL_MEMORY_USAGE_GB.get(model_name, 2) # 모르는 모델은 2GB로 가정
-
-        # 메모리 기준 가능한 작업자 수
+        required_memory_per_task = MODEL_MEMORY_USAGE_GB.get(model_name, 2)
         memory_based_workers = int(available_memory_gb // required_memory_per_task)
-        
-        # CPU와 메모리 기준을 모두 고려하여 최종 작업자 수 결정 (최소 1개, 최대 CPU 코어 수)
         optimal_workers = max(1, min(total_cores, memory_based_workers))
 
         print(f"\n[System Status] CPU Cores: {total_cores}, Available Memory: {available_memory_gb:.2f}GB")
         print(f"[Optimization] Model '{model_name}' requires ~{required_memory_per_task}GB per task.")
         print(f"[Optimization] Decided on {optimal_workers} parallel worker(s).")
-        
+
         # 성능 모드: 병렬 처리
         tasks = [(i, url, model_name) for i, url in enumerate(urls)]
+        temp_results = [None] * len(tasks)
+
         with concurrent.futures.ProcessPoolExecutor(max_workers=optimal_workers) as executor:
-            results = list(executor.map(process_video_task, tasks))
+            # future와 원래 인덱스를 매핑하여 나중에 순서를 맞춤
+            future_to_index = {executor.submit(process_video_task, task): i for i, task in enumerate(tasks)}
+
+            for future in concurrent.futures.as_completed(future_to_index):
+                original_index = future_to_index[future]
+                try:
+                    result = future.result()
+                    temp_results[original_index] = result
+                except Exception as exc:
+                    print(f'Task {original_index} generated an exception: {exc}')
+                    temp_results[original_index] = {"title": f"오류 발생 (URL: {urls[original_index]})", "transcript": str(exc)}
+                
+                # 작업이 완료될 때마다 진행 상황 업데이트
+                TRANSCRIPTION_PROGRESS["current"] += 1
+        results = temp_results
     else:
         # 기본 모드: 순차 처리
         try:
