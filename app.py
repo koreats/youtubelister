@@ -70,7 +70,7 @@ def process_video_task(args):
 
         # 1. Download Audio using yt-dlp
         ydl_opts = {
-            'format': 'bestaudio/best',
+            'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
@@ -78,6 +78,9 @@ def process_video_task(args):
             }],
             'outtmpl': f'temp_audio_{index}.%(ext)s',
             'quiet': True,
+            'no_warnings': False,
+            'extract_flat': False,
+            'cookiesfrombrowser': ('chrome',),  # Chrome 브라우저 쿠키 사용
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -114,7 +117,7 @@ def get_channel_id_from_url(url):
         return (match.group(1).lstrip('@'), 'handle')
 
     # Channel ID: /channel/UC...
-    match = re.search(r'youtube\.com/channel/(UC[a-zA-Z0-9_-]{22}[a-zA-Z0-9_-])', url)
+    match = re.search(r'youtube\.com/channel/(UC[\w-]{21,23})', url)
     if match:
         return (match.group(1), 'id')
 
@@ -145,7 +148,7 @@ def fetch_videos():
         id_type = None
 
         # 1. Check if the input string itself is a raw Channel ID
-        if re.fullmatch(r'UC[a-zA-Z0-9_-]{22}[a-zA-Z0-9_-]', channel_url):
+        if re.fullmatch(r'UC[\w-]{21,23}', channel_url):
             identifier = channel_url
             id_type = 'id'
         else:
@@ -321,7 +324,7 @@ def transcribe_multiple():
             print(f"\n[Video {i+1}/{len(urls)}] Processing URL: {url}")
             try:
                 ydl_opts = {
-                    'format': 'bestaudio/best',
+                    'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
                     'postprocessors': [{
                         'key': 'FFmpegExtractAudio',
                         'preferredcodec': 'mp3',
@@ -329,6 +332,9 @@ def transcribe_multiple():
                     }],
                     'outtmpl': f'temp_audio_{i}.%(ext)s',
                     'quiet': True,
+                    'no_warnings': False,
+                    'extract_flat': False,
+                    'cookiesfrombrowser': ('chrome',),  # Chrome 브라우저 쿠키 사용
                 }
                 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
